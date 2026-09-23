@@ -593,53 +593,45 @@ ssize_t tport_tls_send(tport_t const *self,
 		       size_t iovlen)
 {
   tport_tls_t *tlstp = (tport_tls_t *)self;
-  enum { TLSBUFSIZE = 2048 };
+  /* Largest TLS record payload (SSL3_RT_MAX_PLAIN_LENGTH) */
+  enum { TLSBUFSIZE = 16384 };
   size_t i, j, n, m, size = 0;
   ssize_t nerror;
   int oldmask, mask;
 
   oldmask = tls_events(tlstp->tlstp_context, self->tp_events);
 
-#if 0
+  /* Writing vector by vector puts every few headers in a TLS record of their
+     own, which some peers mis-frame, so gather the vectors into one record.
+     iov[] stays as is: tport_vsend() dumps and captures it afterwards. A blocked
+     write is retried with the same vectors, so it gathers into the same buffer,
+     as tls_write() requires. */
   if (!tlstp->tlstp_buffer)
     tlstp->tlstp_buffer = su_alloc(self->tp_home, TLSBUFSIZE);
-#endif
 
   for (i = 0; i < iovlen; i = j) {
-#if 0
-    nerror = tls_write(tlstp->tlstp_context,
-		  iov[i].siv_base,
-		  m = iov[i].siv_len);
-    j = i + 1;
-#else
     char *buf = tlstp->tlstp_buffer;
-    unsigned tlsbufsize = TLSBUFSIZE;
-
-    if (i + 1 == iovlen)
-      buf = NULL;		/* Don't bother copying single chunk */
-
-    if (buf &&
-	(char *)iov[i].siv_base - buf < TLSBUFSIZE &&
-	(char *)iov[i].siv_base - buf >= 0) {
-      tlsbufsize = buf + TLSBUFSIZE - (char *)iov[i].siv_base;
-      assert(tlsbufsize <= TLSBUFSIZE);
-    }
 
     for (j = i, m = 0; buf && j < iovlen; j++) {
-      if (m + iov[j].siv_len > tlsbufsize)
+      if (m + iov[j].siv_len > TLSBUFSIZE)
 	break;
-      if (buf + m != iov[j].siv_base)
-	memcpy(buf + m, iov[j].siv_base, iov[j].siv_len);
-      m += iov[j].siv_len; iov[j].siv_len = 0;
+      m += iov[j].siv_len;
     }
 
-    if (j == i)
-      buf = iov[i].siv_base, m = iov[i].siv_len, j++;
-    else
-      iov[j].siv_base = buf, iov[j].siv_len = m;
+    if (j <= i + 1) {
+      /* A single vector, or one too large for the buffer: write it in place */
+      buf = iov[i].siv_base, m = iov[i].siv_len, j = i + 1;
+    }
+    else {
+      size_t k, off;
+
+      for (k = i, off = 0; k < j; k++) {
+	memcpy(buf + off, iov[k].siv_base, iov[k].siv_len);
+	off += iov[k].siv_len;
+      }
+    }
 
     nerror = tls_write(tlstp->tlstp_context, buf, m);
-#endif
 
     SU_DEBUG_9(("tport_tls_writevec: vec %p %p %lu ("MOD_ZD")\n",
 		(void *)tlstp->tlstp_context, (void *)iov[i].siv_base, (LU)iov[i].siv_len,
